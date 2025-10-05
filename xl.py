@@ -1,6 +1,6 @@
 """
-Redfin Property Scraper - Complete Version with Auto Price Phases
-All original features + automatic phase management for unlimited scraping
+Redfin Property Scraper - Interactive User Control
+Fixed version with auto-save and oil-only filtering
 """
 
 import time
@@ -14,9 +14,8 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import os
 import subprocess
 from datetime import datetime
-import re
 
-class RedfinScraperComplete:
+class RedfinScraperInteractive:
     def __init__(self, excel_file="redfin_properties.xlsx"):
         self.excel_file = excel_file
         self.driver = None
@@ -24,29 +23,11 @@ class RedfinScraperComplete:
         self.properties_saved_count = 0
         self.start_element = 1
         self.current_page_num = 1
-        
-        # Price phase settings
-        self.use_auto_phases = False
-        self.min_price = 50000  # $50k
-        self.max_price = 10000000  # $10M
-        self.price_step = 50000  # $50k adjustment step
-        self.target_max_results = 369  # Maximum we can scrape per phase
-        self.target_min_results = 200  # Minimum to avoid too many phases
-        
-        # Phase tracking
-        self.current_phase = 0
-        self.phases_completed = []
-        self.current_phase_min = None
-        self.current_phase_max = None
-        self.base_filter = ""
-        
-        # Manual range continuation
-        self.continue_after_manual = False
-        self.manual_range_max = None
-        
+    
     def kill_chrome_processes(self):
         """Kill any existing Chrome/ChromeDriver processes"""
         try:
+            # Kill chromedriver
             subprocess.run(['taskkill', '/F', '/IM', 'chromedriver.exe'], 
                          stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             time.sleep(1)
@@ -66,11 +47,14 @@ class RedfinScraperComplete:
         chrome_options.add_argument('--remote-debugging-port=9222')
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        # Add user agent to avoid detection
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         
         self.driver = webdriver.Chrome(options=chrome_options)
         self.wait = WebDriverWait(self.driver, 20)
         
+        # Execute CDP commands to avoid detection
         self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
             "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
@@ -101,125 +85,7 @@ class RedfinScraperComplete:
         
         input("\nPress ENTER when you have applied all filters and can see the property listings...")
         
-        # Check how many results we have
-        time.sleep(2)
-        total_results = self.get_results_count()
-        
-        print(f"\n📊 Total results found: {total_results} homes")
-        
-        # Offer automatic phase mode if results > 369
-        if total_results > 369:
-            print("\n" + "="*60)
-            print("⚠ RESULTS EXCEED PAGINATION LIMIT (369)")
-            print("="*60)
-            print(f"Found {total_results} homes but can only scrape 369 per phase.")
-            print("\nWould you like to use AUTOMATIC PRICE PHASES?")
-            print("This will automatically divide the scraping into multiple")
-            print("price ranges to capture ALL properties.")
-            print()
-            
-            use_phases = input("Enable automatic phases? (y/n, default: y): ").strip().lower()
-            
-            if use_phases != 'n':
-                # YES - Use full automatic mode
-                self.use_auto_phases = True
-                print("\n✓ Automatic phase mode ENABLED (Full Auto)")
-                print("  The scraper will automatically:")
-                print("  • Start from $50k")
-                print("  • Find optimal price ranges")
-                print("  • Scrape each range completely")
-                print("  • Move to next range automatically")
-                print("  • Continue until $10m")
-                
-                # Get current URL to extract filter
-                current_url = self.driver.current_url
-                if '/filter/' in current_url:
-                    self.base_filter = current_url.split('/filter/')[1].split('/page-')[0]
-                    print(f"\n  Base filter captured: {self.base_filter}")
-                
-                return
-            else:
-                # NO - Ask for manual price range
-                print("\n" + "="*60)
-                print("MANUAL PRICE RANGE")
-                print("="*60)
-                print("You can specify a custom price range to scrape.")
-                print("If your range still has >369 results, it will")
-                print("automatically use phases within your range.")
-                print()
-                
-                # Ask for min price
-                min_input = input("Enter minimum price (e.g., 50k, 500k, 1m) [default: 50k]: ").strip().lower()
-                if min_input:
-                    if 'm' in min_input:
-                        self.min_price = int(float(min_input.replace('m', '')) * 1000000)
-                    elif 'k' in min_input:
-                        self.min_price = int(float(min_input.replace('k', '')) * 1000)
-                    else:
-                        self.min_price = int(min_input)
-                
-                # Ask for max price
-                max_input = input("Enter maximum price (e.g., 450k, 1m, 5m) [default: 10m]: ").strip().lower()
-                if max_input:
-                    if 'm' in max_input:
-                        self.max_price = int(float(max_input.replace('m', '')) * 1000000)
-                    elif 'k' in max_input:
-                        self.max_price = int(float(max_input.replace('k', '')) * 1000)
-                    else:
-                        self.max_price = int(max_input)
-                
-                print(f"\n✓ Price range set: ${self.format_price_for_url(self.min_price)} - ${self.format_price_for_url(self.max_price)}")
-                
-                # Get current URL to extract filter
-                current_url = self.driver.current_url
-                if '/filter/' in current_url:
-                    self.base_filter = current_url.split('/filter/')[1].split('/page-')[0]
-                
-                # Test the user's range
-                print(f"\n→ Testing your price range...")
-                url = self.build_url_with_price_range(self.min_price, self.max_price)
-                self.driver.get(url)
-                time.sleep(3)
-                
-                range_results = self.get_results_count()
-                print(f"   ${self.format_price_for_url(self.min_price)}-${self.format_price_for_url(self.max_price)} = {range_results} homes")
-                
-                if range_results > 369:
-                    print(f"\n⚠ Your range has {range_results} homes (>369)")
-                    print("✓ Automatically enabling PHASE MODE within your range")
-                    print(f"  Will start from ${self.format_price_for_url(self.min_price)}")
-                    print(f"  Will auto-adjust max price to get 200-369 per phase")
-                    print(f"  Will continue until ${self.format_price_for_url(self.max_price)}")
-                    self.use_auto_phases = True
-                    return
-                else:
-                    print(f"\n✓ Your range has {range_results} homes (≤369)")
-                    print("✓ Will scrape this range in NORMAL MODE first")
-                    
-                    # Check if there are more homes beyond this range
-                    if self.max_price < 10000000:  # If user's max is less than $10m
-                        print(f"\n⚠ Note: Total results were {total_results} homes")
-                        print(f"   Your range only covers {range_results} homes")
-                        print(f"   Remaining homes: ~{total_results - range_results}")
-                        print(f"\nAfter completing ${self.format_price_for_url(self.min_price)}-${self.format_price_for_url(self.max_price)},")
-                        print(f"continue with automatic phases from ${self.format_price_for_url(self.max_price + 1)} to $10m?")
-                        
-                        continue_after = input("Continue after this range? (y/n, default: y): ").strip().lower()
-                        
-                        if continue_after != 'n':
-                            self.continue_after_manual = True
-                            self.manual_range_max = self.max_price
-                            print(f"\n✓ Will continue automatically after ${self.format_price_for_url(self.max_price)}")
-                        else:
-                            self.continue_after_manual = False
-                            print(f"\n✓ Will stop after ${self.format_price_for_url(self.max_price)}")
-                    else:
-                        self.continue_after_manual = False
-                    
-                    # Continue to normal mode with page/element selection
-                    pass
-        
-        # Normal mode - ask about starting position
+        # Ask about starting page and element
         print("\n" + "-"*60)
         print("STARTING POSITION:")
         print("-"*60)
@@ -245,18 +111,20 @@ class RedfinScraperComplete:
         time.sleep(2)
         total_elements = 0
         try:
+            # Wait for property cards to load
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.bp-Homecard'))
             )
-            time.sleep(1)
+            time.sleep(1)  # Extra wait for all elements to render
             
+            # Count actual property links
             property_links = self.driver.find_elements(By.CSS_SELECTOR, 'a.bp-Homecard__Address')
             property_urls = [link.get_attribute('href') for link in property_links if link.get_attribute('href')]
             total_elements = len(property_urls)
             print(f"\n📋 Found {total_elements} properties on this page")
         except Exception as e:
             print(f"\n⚠ Could not count properties: {e}")
-            total_elements = 40
+            total_elements = 40  # Default fallback
             print(f"📋 Using default count: {total_elements} properties")
         
         # Ask which element to start from
@@ -281,196 +149,6 @@ class RedfinScraperComplete:
         print("\n" + "="*60)
         print("STARTING SCRAPING...")
         print("="*60 + "\n")
-    
-    def get_results_count(self):
-        """Extract number of homes from page"""
-        try:
-            homes_elem = self.driver.find_element(By.CSS_SELECTOR, 'div.homes.summary')
-            homes_text = homes_elem.text.strip()
-            
-            # Extract number from text like "268 homes"
-            match = re.search(r'(\d+)', homes_text.replace(',', ''))
-            if match:
-                return int(match.group(1))
-            
-            return 0
-        except:
-            return 0
-    
-    def format_price_for_url(self, price):
-        """Format price for URL (50k, 900k, 1m, 1.5m, etc.)"""
-        if price >= 1000000:
-            # Convert to millions
-            millions = price / 1000000
-            if millions == int(millions):
-                return f"{int(millions)}m"
-            else:
-                return f"{millions:.1f}m".rstrip('0').rstrip('.')
-        else:
-            # Convert to thousands
-            return f"{price//1000}k"
-    
-    def build_url_with_price_range(self, min_price, max_price):
-        """Build URL with specific price range"""
-        min_str = self.format_price_for_url(min_price)
-        max_str = self.format_price_for_url(max_price)
-        
-        price_filter = f"min-price={min_str},max-price={max_str}"
-        
-        # If base_filter already has price, remove it
-        base_parts = [p for p in self.base_filter.split(',') if not p.startswith('min-price') and not p.startswith('max-price')]
-        base_clean = ','.join(base_parts)
-        
-        if base_clean:
-            full_filter = f"{base_clean},{price_filter}"
-        else:
-            full_filter = price_filter
-            
-        url = f"{self.base_url}/filter/{full_filter}"
-        return url
-    
-    def find_optimal_price_range(self, start_min, start_max):
-        """Find optimal price range using smart binary search"""
-        print(f"\n→ Finding optimal range starting from ${self.format_price_for_url(start_min)}-${self.format_price_for_url(start_max)}...")
-        
-        # First check the full range
-        url = self.build_url_with_price_range(start_min, start_max)
-        self.driver.get(url)
-        time.sleep(3)
-        
-        results = self.get_results_count()
-        print(f"   ${self.format_price_for_url(start_min)}-${self.format_price_for_url(start_max)} = {results} homes")
-        
-        if results == 0:
-            print(f"   ✗ No results, price range exhausted")
-            return None, None, 0
-        
-        # If already in target range, use it
-        if results <= self.target_max_results and results >= self.target_min_results:
-            print(f"   ✓ Already optimal: ${self.format_price_for_url(start_min)}-${self.format_price_for_url(start_max)} ({results} homes)")
-            return start_min, start_max, results
-        
-        # If too few results, just use the whole range
-        if results < self.target_min_results:
-            print(f"   ✓ Using full range (low results): ${self.format_price_for_url(start_min)}-${self.format_price_for_url(start_max)} ({results} homes)")
-            return start_min, start_max, results
-        
-        # Too many results - use binary search to find optimal max price
-        print(f"   → Too many results ({results}), using binary search...")
-        
-        low_max = start_min
-        high_max = start_max
-        best_max = start_max
-        best_results = results
-        
-        iteration = 0
-        max_iterations = 15  # Prevent infinite loops
-        
-        while low_max < high_max and iteration < max_iterations:
-            iteration += 1
-            
-            # Calculate middle point
-            mid_max = (low_max + high_max) // 2
-            
-            # Round to nearest 50k for cleaner URLs
-            mid_max = (mid_max // 50000) * 50000
-            
-            if mid_max <= start_min:
-                mid_max = start_min + 50000
-            
-            # Test this range
-            url = self.build_url_with_price_range(start_min, mid_max)
-            self.driver.get(url)
-            time.sleep(3)
-            
-            results = self.get_results_count()
-            print(f"   [{iteration}] ${self.format_price_for_url(start_min)}-${self.format_price_for_url(mid_max)} = {results} homes")
-            
-            if results <= self.target_max_results and results >= self.target_min_results:
-                # Found optimal range
-                print(f"   ✓ Optimal range found: ${self.format_price_for_url(start_min)}-${self.format_price_for_url(mid_max)} ({results} homes)")
-                return start_min, mid_max, results
-            
-            if results > self.target_max_results:
-                # Still too many, search lower half
-                high_max = mid_max - 50000
-                if results < best_results:
-                    best_max = mid_max
-                    best_results = results
-            else:
-                # Too few, search upper half
-                low_max = mid_max + 50000
-                best_max = mid_max
-                best_results = results
-        
-        # If we couldn't find perfect range, use best one found
-        if best_results < self.target_min_results:
-            # Try expanding a bit
-            test_max = best_max + 100000
-            if test_max <= start_max:
-                url = self.build_url_with_price_range(start_min, test_max)
-                self.driver.get(url)
-                time.sleep(3)
-                
-                results = self.get_results_count()
-                print(f"   [expand] ${self.format_price_for_url(start_min)}-${self.format_price_for_url(test_max)} = {results} homes")
-                
-                if results <= self.target_max_results:
-                    best_max = test_max
-                    best_results = results
-        
-        print(f"   ✓ Using best found: ${self.format_price_for_url(start_min)}-${self.format_price_for_url(best_max)} ({best_results} homes)")
-        return start_min, best_max, best_results
-    
-    def scrape_phase(self, phase_min, phase_max):
-        """Scrape all properties in a price phase"""
-        print(f"\n{'='*60}")
-        print(f"PHASE {self.current_phase}: ${self.format_price_for_url(phase_min)} - ${self.format_price_for_url(phase_max)}")
-        print(f"{'='*60}")
-        
-        oil_count_phase = 0
-        page_num = 1
-        
-        # Navigate to first page of this phase
-        url = self.build_url_with_price_range(phase_min, phase_max)
-        self.driver.get(url)
-        time.sleep(3)
-        
-        while True:
-            print(f"\n→ Page {page_num} of Phase {self.current_phase}...")
-            
-            # Scrape current page
-            oil_count = self.scrape_current_page()
-            oil_count_phase += oil_count
-            
-            print(f"   Oil properties on this page: {oil_count}")
-            print(f"   Phase total so far: {oil_count_phase}")
-            
-            # Check for next page
-            if not self.has_next_page():
-                print(f"   ✓ No more pages in this phase")
-                break
-            
-            # Go to next page automatically (no user prompt)
-            if not self.go_to_next_page():
-                print(f"   ✗ Failed to navigate to next page")
-                break
-            
-            page_num += 1
-            time.sleep(2)
-        
-        print(f"\n✓ Phase {self.current_phase} complete:")
-        print(f"   Price range: ${self.format_price_for_url(phase_min)} - ${self.format_price_for_url(phase_max)}")
-        print(f"   Oil properties: {oil_count_phase}")
-        
-        self.phases_completed.append({
-            'phase': self.current_phase,
-            'min_price': phase_min,
-            'max_price': phase_max,
-            'oil_count': oil_count_phase
-        })
-        
-        return oil_count_phase
     
     def close_popup_if_exists(self):
         """Close any popup that appears"""
@@ -952,14 +630,14 @@ class RedfinScraperComplete:
             property_urls = [link.get_attribute('href') for link in property_links if link.get_attribute('href')]
             
             total_on_page = len(property_urls)
-            print(f"   📋 Found {total_on_page} properties on this page")
+            print(f"\n📋 Found {total_on_page} properties on this page")
             
-            # Apply starting element filter (only for first time in normal mode)
-            if self.start_element > 1 and not self.use_auto_phases:
-                print(f"   ⚡ Starting from property #{self.start_element}")
+            # Apply starting element filter (only for first time)
+            if self.start_element > 1:
+                print(f"⚡ Starting from property #{self.start_element}")
                 property_urls = property_urls[self.start_element - 1:]  # Python uses 0-based index
                 properties_to_scrape = len(property_urls)
-                print(f"   📋 Will scrape {properties_to_scrape} properties (skipped first {self.start_element - 1})")
+                print(f"📋 Will scrape {properties_to_scrape} properties (skipped first {self.start_element - 1})")
                 # Reset to 1 for subsequent pages
                 self.start_element = 1
             else:
@@ -969,7 +647,7 @@ class RedfinScraperComplete:
             
             # Process each property
             for i, url in enumerate(property_urls, 1):
-                print(f"   [{i}/{properties_to_scrape}] Processing: {url}")
+                print(f"[{i}/{properties_to_scrape}] Processing: {url}")
                 
                 try:
                     property_data = self.extract_property_details(url)
@@ -985,10 +663,10 @@ class RedfinScraperComplete:
                     # Continue to next property instead of stopping
                     continue
             
-            print(f"\n   ✓ Oil properties found on this page: {oil_properties_on_page}")
+            print(f"\n✓ Oil properties found on this page: {oil_properties_on_page}")
             
         except Exception as e:
-            print(f"   ✗ Error scraping page: {e}")
+            print(f"✗ Error scraping page: {e}")
         
         return oil_properties_on_page
     
@@ -1001,17 +679,21 @@ class RedfinScraperComplete:
             # Check if it has the hidden class
             button_classes = next_button.get_attribute('class')
             if 'PageArrow--hidden' in button_classes:
+                print("  ℹ Next button is hidden (last page)")
                 return False
             
             # Check if button is disabled
             if not next_button.is_enabled():
+                print("  ℹ Next button is disabled (last page)")
                 return False
                 
             return True
             
         except NoSuchElementException:
+            print("  ℹ Next button not found (last page)")
             return False
         except Exception as e:
+            print(f"  ⚠ Error checking for next page: {e}")
             return False
     
     def go_to_next_page(self):
@@ -1027,9 +709,11 @@ class RedfinScraperComplete:
             # Click it
             try:
                 next_button.click()
+                print("  ✓ Clicked next button")
             except:
                 # Try JavaScript click if normal click fails
                 self.driver.execute_script("arguments[0].click();", next_button)
+                print("  ✓ Clicked next button (JavaScript)")
             
             time.sleep(3)
             
@@ -1038,91 +722,12 @@ class RedfinScraperComplete:
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.bp-Homecard'))
             )
             
+            print("  ✓ New page loaded")
             return True
             
         except Exception as e:
             print(f"  ✗ Error navigating to next page: {e}")
             return False
-    
-    def run_normal_mode(self):
-        """Run in normal mode (original functionality)"""
-        # Continue scraping until no more pages or user stops
-        while True:
-            print("\n" + "="*60)
-            print(f"SCRAPING PAGE {self.current_page_num}")
-            print("="*60)
-            
-            # Scrape current page (saves automatically)
-            oil_count = self.scrape_current_page()
-            
-            print(f"\n📊 Page {self.current_page_num} Summary:")
-            print(f"   • Oil properties on this page: {oil_count}")
-            print(f"   • Total oil properties saved: {self.properties_saved_count}")
-            
-            # Check for next page
-            print("\n→ Checking for next page...")
-            if not self.has_next_page():
-                print("\n" + "="*60)
-                print("✓ NO MORE PAGES in current range")
-                print("="*60)
-                break
-            
-            # Navigate automatically (no user prompt)
-            print("\n→ Navigating to next page automatically...")
-            if not self.go_to_next_page():
-                print("\n✗ Failed to navigate to next page - stopping")
-                break
-            
-            self.current_page_num += 1
-            time.sleep(2)  # Extra wait between pages
-        
-        # Check if we need to continue with remaining price ranges
-        if self.continue_after_manual and self.manual_range_max:
-            print("\n" + "="*60)
-            print("MANUAL RANGE COMPLETED")
-            print("="*60)
-            print(f"✓ Finished scraping: ${self.format_price_for_url(self.min_price)}-${self.format_price_for_url(self.manual_range_max)}")
-            print(f"📊 Oil properties found so far: {self.properties_saved_count}")
-            print("\n→ Starting AUTOMATIC PHASES for remaining ranges...")
-            print(f"   From: ${self.format_price_for_url(self.manual_range_max + 1)}")
-            print(f"   To: $10m")
-            
-            # Switch to auto-phase mode for remaining ranges
-            self.use_auto_phases = True
-            self.min_price = self.manual_range_max + 1
-            self.max_price = 10000000
-            
-            # Small delay before continuing
-            time.sleep(3)
-            
-            # Run auto-phase for remaining ranges
-            self.run_auto_phase_mode()
-    
-    def run_auto_phase_mode(self):
-        """Run in automatic phase mode"""
-        current_min = self.min_price
-        
-        while current_min < self.max_price:
-            self.current_phase += 1
-            
-            # Find optimal price range
-            phase_min, phase_max, result_count = self.find_optimal_price_range(
-                current_min, self.max_price
-            )
-            
-            if phase_min is None:
-                print(f"\n✓ All price ranges exhausted")
-                break
-            
-            # Scrape this phase
-            self.scrape_phase(phase_min, phase_max)
-            
-            # Move to next price range
-            current_min = phase_max + 1
-            
-            if current_min >= self.max_price:
-                print(f"\n✓ Reached maximum price (${self.format_price_for_url(self.max_price)})")
-                break
     
     def run(self):
         """Main run method"""
@@ -1133,39 +738,54 @@ class RedfinScraperComplete:
             # Setup browser
             self.setup_driver()
             
-            # Let user apply filters and choose mode
+            # Let user apply filters
             self.start_and_wait_for_user()
             
-            # Run appropriate mode
-            if self.use_auto_phases:
+            # Continue scraping until no more pages or user stops
+            while True:
                 print("\n" + "="*60)
-                print("RUNNING IN AUTOMATIC PHASE MODE")
+                print(f"SCRAPING PAGE {self.current_page_num}")
                 print("="*60)
-                self.run_auto_phase_mode()
-            else:
-                print("\n" + "="*60)
-                print("RUNNING IN NORMAL MODE")
-                print("="*60)
-                self.run_normal_mode()
-                # Note: run_normal_mode() may switch to auto_phase if continue_after_manual is True
+                
+                # Scrape current page (saves automatically)
+                oil_count = self.scrape_current_page()
+                
+                print(f"\n📊 Page {self.current_page_num} Summary:")
+                print(f"   • Oil properties on this page: {oil_count}")
+                print(f"   • Total oil properties saved: {self.properties_saved_count}")
+                
+                # Check for next page
+                print("\n→ Checking for next page...")
+                if not self.has_next_page():
+                    print("\n" + "="*60)
+                    print("✓ NO MORE PAGES - Reached the end")
+                    print("="*60)
+                    break
+                
+                # Ask user if they want to continue
+                print("\n" + "-"*60)
+                print(f"📄 More pages available...")
+                continue_scraping = input("Continue to next page? (y/n, default: y): ").strip().lower()
+                
+                if continue_scraping == 'n':
+                    print("\n✓ Scraping stopped by user")
+                    break
+                
+                # Go to next page
+                print("\n→ Navigating to next page...")
+                if not self.go_to_next_page():
+                    print("\n✗ Failed to navigate to next page - stopping")
+                    break
+                
+                self.current_page_num += 1
+                time.sleep(2)  # Extra wait between pages
             
             # Final summary
             print("\n" + "="*60)
             print("SCRAPING COMPLETED!")
             print("="*60)
-            
-            if self.current_phase > 0:
-                # Phase mode was used
-                print(f"📄 Total phases completed: {self.current_phase}")
-                print(f"🔥 Total OIL properties saved: {self.properties_saved_count}")
-                print(f"\n📊 Phase breakdown:")
-                for phase in self.phases_completed:
-                    print(f"   Phase {phase['phase']}: ${self.format_price_for_url(phase['min_price'])}-${self.format_price_for_url(phase['max_price'])} = {phase['oil_count']} oil properties")
-            else:
-                # Normal mode only
-                print(f"📄 Total pages scraped: {self.current_page_num}")
-                print(f"🔥 Total OIL properties saved: {self.properties_saved_count}")
-            
+            print(f"📄 Total pages scraped: {self.current_page_num}")
+            print(f"🔥 Total OIL properties saved: {self.properties_saved_count}")
             print(f"✓ Data saved to: {self.excel_file}")
             print("="*60 + "\n")
             
@@ -1194,7 +814,6 @@ def main():
     print("╔" + "="*58 + "╗")
     print("║" + " "*15 + "REDFIN WEB SCRAPER" + " "*25 + "║")
     print("║" + " "*10 + "OIL HEATING PROPERTIES ONLY" + " "*20 + "║")
-    print("║" + " "*8 + "WITH AUTO-PHASE CAPABILITY" + " "*22 + "║")
     print("╚" + "="*58 + "╝")
     
     excel_file = input("\nEnter Excel filename (default: redfin_oil_properties.xlsx): ").strip()
@@ -1208,13 +827,12 @@ def main():
     print("✓ Only properties with OIL heating will be saved")
     print("✓ URL column will NOT be included")
     print("✓ Data is saved after EACH property (safe from interruptions)")
-    print("✓ NO user prompts during scraping (fully automatic)")
     
     if os.path.exists(excel_file):
         print(f"\n⚠ File already exists: {excel_file}")
         print("✓ New data will be APPENDED to existing file")
     
-    scraper = RedfinScraperComplete(excel_file=excel_file)
+    scraper = RedfinScraperInteractive(excel_file=excel_file)
     scraper.run()
 
 
