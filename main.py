@@ -1,6 +1,6 @@
 """
 Redfin Property Scraper - Interactive User Control
-Allows user to select all filters manually
+Fixed version with auto-save and oil-only filtering
 """
 
 import time
@@ -20,7 +20,9 @@ class RedfinScraperInteractive:
         self.excel_file = excel_file
         self.driver = None
         self.base_url = "https://www.redfin.com/county/1974/NY/Nassau-County"
-        self.listing_status = None
+        self.properties_saved_count = 0
+        self.start_element = 1
+        self.current_page_num = 1
     
     def kill_chrome_processes(self):
         """Kill any existing Chrome/ChromeDriver processes"""
@@ -83,31 +85,66 @@ class RedfinScraperInteractive:
         
         input("\nPress ENTER when you have applied all filters and can see the property listings...")
         
-        # Ask user what they selected
+        # Ask about starting page and element
         print("\n" + "-"*60)
-        status = input("Did you select 'Sold' or 'For Sale'? (sold/sale): ").strip().lower()
-        self.listing_status = 'sold' if status == 'sold' else 'for-sale'
-        print(f"Listing Status: {self.listing_status}")
+        print("STARTING POSITION:")
+        print("-"*60)
         
-        # Ask about starting page
-        start_page_input = input("\nWhat page should we start from? (default: 1): ").strip()
-        start_page = int(start_page_input) if start_page_input else 1
+        start_page_input = input("What page should we start from? (default: 1): ").strip()
+        self.current_page_num = int(start_page_input) if start_page_input else 1
         
-        if start_page > 1:
-            print(f"\nNavigating to page {start_page}...")
-            # Get current URL and modify it
+        # Navigate to starting page if needed
+        if self.current_page_num > 1:
+            print(f"\nNavigating to page {self.current_page_num}...")
             current_url = self.driver.current_url
             if '/page-' in current_url:
-                # Replace existing page number
                 base_url = current_url.split('/page-')[0]
-                new_url = f"{base_url}/page-{start_page}"
+                new_url = f"{base_url}/page-{self.current_page_num}"
             else:
-                new_url = f"{current_url}/page-{start_page}"
+                new_url = f"{current_url}/page-{self.current_page_num}"
             
             self.driver.get(new_url)
             time.sleep(3)
-            print(f"On page {start_page}")
-            input("\nPress ENTER to start scraping from this page...")
+            print(f"✓ On page {self.current_page_num}")
+        
+        # Wait for page to fully load and count ACTUAL elements
+        time.sleep(2)
+        total_elements = 0
+        try:
+            # Wait for property cards to load
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.bp-Homecard'))
+            )
+            time.sleep(1)  # Extra wait for all elements to render
+            
+            # Count actual property links
+            property_links = self.driver.find_elements(By.CSS_SELECTOR, 'a.bp-Homecard__Address')
+            property_urls = [link.get_attribute('href') for link in property_links if link.get_attribute('href')]
+            total_elements = len(property_urls)
+            print(f"\n📋 Found {total_elements} properties on this page")
+        except Exception as e:
+            print(f"\n⚠ Could not count properties: {e}")
+            total_elements = 40  # Default fallback
+            print(f"📋 Using default count: {total_elements} properties")
+        
+        # Ask which element to start from
+        if total_elements > 0:
+            start_element_input = input(f"Which property should we start from? (1-{total_elements}, default: 1): ").strip()
+        else:
+            start_element_input = input(f"Which property should we start from? (default: 1): ").strip()
+            
+        self.start_element = int(start_element_input) if start_element_input else 1
+        
+        if self.start_element < 1:
+            self.start_element = 1
+        elif total_elements > 0 and self.start_element > total_elements:
+            print(f"⚠ Element {self.start_element} is out of range, starting from element 1")
+            self.start_element = 1
+        
+        if self.start_element > 1:
+            print(f"✓ Will start from property #{self.start_element} (skipping first {self.start_element - 1})")
+        else:
+            print(f"✓ Will start from property #1")
         
         print("\n" + "="*60)
         print("STARTING SCRAPING...")
@@ -128,18 +165,18 @@ class RedfinScraperInteractive:
     
     def extract_property_details(self, property_url):
         """Extract detailed property information from property page"""
-        # Open in new tab with the URL directly
-        self.driver.execute_script(f"window.open('{property_url}', '_blank');")
-        time.sleep(2)
-        self.driver.switch_to.window(self.driver.window_handles[-1])
-        
         property_data = {
             'url': property_url,
-            'listing_status': self.listing_status,
+            'listing_status': 'unknown',
             'scrape_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         
         try:
+            # Open in new tab with the URL directly
+            self.driver.execute_script(f"window.open('{property_url}', '_blank');")
+            time.sleep(2)
+            self.driver.switch_to.window(self.driver.window_handles[-1])
+            
             # Navigate if not already on the page
             if self.driver.current_url != property_url:
                 self.driver.get(property_url)
@@ -154,52 +191,159 @@ class RedfinScraperInteractive:
             # Close popup if exists
             self.close_popup_if_exists()
             
-            # Get sold date (only for sold properties)
-            if self.listing_status == 'sold':
-                try:
-                    sold_banner = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, 'div.ListingStatusBannerSection'))
-                    )
-                    sold_text = sold_banner.text
-                    if 'SOLD ON' in sold_text:
-                        property_data['sold_date'] = sold_text.split('SOLD ON')[1].strip()
-                    else:
-                        property_data['sold_date'] = sold_text.replace('SOLD', '').strip()
-                except:
-                    property_data['sold_date'] = 'N/A'
-            else:
-                property_data['sold_date'] = 'N/A'
-            
-            # Get address - try multiple selectors
+            # Detect listing status dynamically from the banner
             try:
-                # Try main address
-                address_elem = self.driver.find_element(By.CSS_SELECTOR, 'h1.full-address')
-                street = address_elem.text.split(',')[0].strip()
-                property_data['street_address'] = street
+                status_banner = WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, 'div.ListingStatusBannerSection'))
+                )
+                banner_text = status_banner.text.upper()
                 
-                # Get city, state, zip
-                city_state_zip_elem = self.driver.find_element(By.CSS_SELECTOR, 'span.bp-cityStateZip')
-                city_state_zip = city_state_zip_elem.text
-                
-                parts = city_state_zip.split(',')
-                property_data['city'] = parts[0].strip() if len(parts) > 0 else ''
-                
-                if len(parts) > 1:
-                    state_zip = parts[1].strip().split()
-                    property_data['state'] = state_zip[0] if len(state_zip) > 0 else ''
-                    property_data['zip_code'] = state_zip[1] if len(state_zip) > 1 else ''
+                if 'SOLD' in banner_text:
+                    property_data['listing_status'] = 'sold'
+                    # Extract sold date
+                    if 'ON' in banner_text:
+                        sold_date = banner_text.split('ON')[1].strip()
+                        property_data['sold_date'] = sold_date
+                    else:
+                        property_data['sold_date'] = banner_text.replace('SOLD', '').strip()
+                    print(f"  ℹ Status: SOLD on {property_data['sold_date']}")
+                elif 'FOR SALE' in banner_text:
+                    property_data['listing_status'] = 'for-sale'
+                    property_data['sold_date'] = '-'
+                    print(f"  ℹ Status: FOR SALE")
                 else:
-                    property_data['state'] = ''
-                    property_data['zip_code'] = ''
+                    property_data['listing_status'] = 'unknown'
+                    property_data['sold_date'] = '-'
+                    print(f"  ⚠ Status: Unknown ({banner_text})")
                     
-                property_data['full_address'] = f"{street}, {city_state_zip}"
+            except Exception as e:
+                print(f"  ⚠ Could not detect listing status: {e}")
+                property_data['listing_status'] = 'unknown'
+                property_data['sold_date'] = '-'
+            
+            # Get address - try multiple selectors for both sold and for-sale
+            try:
+                # Method 1: Try the standard full address (works for SOLD)
+                try:
+                    address_elem = self.driver.find_element(By.CSS_SELECTOR, 'h1.full-address')
+                    full_address_text = address_elem.text.strip()
+                    
+                    # Parse the address - SOLD format: "25 Schooner Ln, Port Washington, NY 11050"
+                    if ',' in full_address_text:
+                        parts = [p.strip() for p in full_address_text.split(',')]
+                        
+                        if len(parts) >= 3:
+                            # Format: Street, City, State Zip
+                            property_data['street_address'] = parts[0]
+                            property_data['city'] = parts[1]
+                            
+                            # Parse "NY 11050"
+                            state_zip = parts[2].split()
+                            if len(state_zip) >= 2:
+                                property_data['state'] = state_zip[0]
+                                property_data['zip_code'] = state_zip[1]
+                            else:
+                                property_data['state'] = parts[2]
+                                property_data['zip_code'] = '-'
+                                
+                        elif len(parts) == 2:
+                            # Format: Street, City State Zip
+                            property_data['street_address'] = parts[0]
+                            
+                            # Parse "Port Washington NY 11050"
+                            remainder = parts[1].split()
+                            if len(remainder) >= 3:
+                                property_data['zip_code'] = remainder[-1]
+                                property_data['state'] = remainder[-2]
+                                property_data['city'] = ' '.join(remainder[:-2])
+                            elif len(remainder) == 2:
+                                property_data['state'] = remainder[0]
+                                property_data['zip_code'] = remainder[1]
+                                property_data['city'] = '-'
+                            else:
+                                property_data['city'] = parts[1]
+                                property_data['state'] = '-'
+                                property_data['zip_code'] = '-'
+                        else:
+                            property_data['street_address'] = parts[0]
+                            property_data['city'] = '-'
+                            property_data['state'] = '-'
+                            property_data['zip_code'] = '-'
+                    else:
+                        # Single line address
+                        property_data['street_address'] = full_address_text
+                        property_data['city'] = '-'
+                        property_data['state'] = '-'
+                        property_data['zip_code'] = '-'
+                    
+                    property_data['full_address'] = full_address_text
+                    print(f"  ✓ Address: {property_data['full_address']}")
+                    
+                except:
+                    # Method 2: For FOR SALE properties with different structure
+                    try:
+                        # Try street-address class specifically
+                        street_elem = self.driver.find_element(By.CSS_SELECTOR, 'h1.street-address')
+                        full_address_text = street_elem.text.strip()
+                        
+                        # Parse: "166 N Oak St, Massapequa, NY 11758"
+                        if ',' in full_address_text:
+                            parts = [p.strip() for p in full_address_text.split(',')]
+                            
+                            if len(parts) >= 3:
+                                # Street, City, State ZIP
+                                property_data['street_address'] = parts[0]
+                                property_data['city'] = parts[1]
+                                
+                                # Parse "NY 11758"
+                                state_zip = parts[2].split()
+                                if len(state_zip) >= 2:
+                                    property_data['state'] = state_zip[0]
+                                    property_data['zip_code'] = state_zip[1]
+                                else:
+                                    property_data['state'] = parts[2]
+                                    property_data['zip_code'] = '-'
+                            elif len(parts) == 2:
+                                property_data['street_address'] = parts[0]
+                                # Try to parse city, state, zip from second part
+                                remainder = parts[1].split()
+                                if len(remainder) >= 2:
+                                    property_data['zip_code'] = remainder[-1]
+                                    property_data['state'] = remainder[-2]
+                                    property_data['city'] = ' '.join(remainder[:-2])
+                                else:
+                                    property_data['city'] = parts[1]
+                                    property_data['state'] = '-'
+                                    property_data['zip_code'] = '-'
+                            else:
+                                property_data['street_address'] = parts[0]
+                                property_data['city'] = '-'
+                                property_data['state'] = '-'
+                                property_data['zip_code'] = '-'
+                        else:
+                            property_data['street_address'] = full_address_text
+                            property_data['city'] = '-'
+                            property_data['state'] = '-'
+                            property_data['zip_code'] = '-'
+                        
+                        property_data['full_address'] = full_address_text
+                        print(f"  ✓ Address: {property_data['full_address']}")
+                        
+                    except Exception as e2:
+                        print(f"  ⚠ Both address methods failed: {e2}")
+                        property_data['street_address'] = '-'
+                        property_data['city'] = '-'
+                        property_data['state'] = '-'
+                        property_data['zip_code'] = '-'
+                        property_data['full_address'] = '-'
+                        
             except Exception as e:
                 print(f"  ⚠ Error extracting address: {e}")
-                property_data['street_address'] = 'N/A'
-                property_data['city'] = 'N/A'
-                property_data['state'] = 'N/A'
-                property_data['zip_code'] = 'N/A'
-                property_data['full_address'] = 'N/A'
+                property_data['street_address'] = '-'
+                property_data['city'] = '-'
+                property_data['state'] = '-'
+                property_data['zip_code'] = '-'
+                property_data['full_address'] = '-'
             
             # Get price
             try:
@@ -210,28 +354,28 @@ class RedfinScraperInteractive:
                     price_elem = self.driver.find_element(By.CSS_SELECTOR, 'div.price')
                     property_data['price'] = price_elem.text.strip()
                 except:
-                    property_data['price'] = 'N/A'
+                    property_data['price'] = '-'
             
             # Get beds
             try:
                 beds_elem = self.driver.find_element(By.CSS_SELECTOR, 'div.beds-section .statsValue')
                 property_data['beds'] = beds_elem.text.strip()
             except:
-                property_data['beds'] = 'N/A'
+                property_data['beds'] = '-'
             
             # Get baths
             try:
                 baths_elem = self.driver.find_element(By.CSS_SELECTOR, 'div.baths-section .statsValue')
                 property_data['baths'] = baths_elem.text.strip()
             except:
-                property_data['baths'] = 'N/A'
+                property_data['baths'] = '-'
             
             # Get sqft
             try:
                 sqft_elem = self.driver.find_element(By.CSS_SELECTOR, 'div.sqft-section .statsValue')
                 property_data['sqft'] = sqft_elem.text.strip()
             except:
-                property_data['sqft'] = 'N/A'
+                property_data['sqft'] = '-'
             
             # Get property type
             try:
@@ -239,7 +383,7 @@ class RedfinScraperInteractive:
                 prop_type_elem = self.driver.find_element(By.XPATH, '//span[text()="Property Type"]/preceding-sibling::span[@class="valueText"]')
                 property_data['property_type'] = prop_type_elem.text.strip()
             except:
-                property_data['property_type'] = 'N/A'
+                property_data['property_type'] = '-'
             
             # Scroll down to find Interior section
             try:
@@ -250,8 +394,8 @@ class RedfinScraperInteractive:
             
             # Find and click Interior section
             property_data['has_oil_heating'] = 'No'
-            property_data['heating_type'] = 'N/A'
-            property_data['cooling_type'] = 'N/A'
+            property_data['heating_type'] = '-'
+            property_data['cooling_type'] = '-'
             
             try:
                 # Scroll to property details section first
@@ -325,7 +469,6 @@ class RedfinScraperInteractive:
                             
                             for item in all_items:
                                 item_text = item.text
-                                # print(f"    - Item text: {item_text[:50]}...")  # Debug each item
                                 
                                 if 'Heating:' in item_text or 'Heating :' in item_text:
                                     print(f"  ✓ Found heating item: {item_text}")
@@ -374,8 +517,6 @@ class RedfinScraperInteractive:
                     
                     if not heating_found:
                         print("  ⚠ Could not extract heating information after all methods")
-                        # Print first 500 chars of page text for debugging
-                        print(f"  ℹ Page text sample: {page_text[:500]}")
                         
                 else:
                     print("  ⚠ Interior section not found on page")
@@ -390,13 +531,13 @@ class RedfinScraperInteractive:
                 listing_agent = self.driver.find_element(By.XPATH, '//span[contains(text(), "Listing by")]/span').text
                 property_data['listing_agent'] = listing_agent
             except:
-                property_data['listing_agent'] = 'N/A'
+                property_data['listing_agent'] = '-'
             
             try:
                 broker = self.driver.find_element(By.CSS_SELECTOR, 'span.agent-basic-details--broker').text
                 property_data['broker'] = broker.replace('•', '').strip()
             except:
-                property_data['broker'] = 'N/A'
+                property_data['broker'] = '-'
             
             print(f"  ✓ Extracted: {property_data.get('street_address', 'Unknown')} - Oil: {property_data['has_oil_heating']}")
             
@@ -404,104 +545,189 @@ class RedfinScraperInteractive:
             print(f"  ✗ Error extracting property details: {e}")
             property_data['error'] = str(e)
         
+        except Exception as outer_e:
+            print(f"  ✗ Critical error (browser issue): {outer_e}")
+            property_data['error'] = f"Browser error: {str(outer_e)}"
+        
         finally:
-            # Close tab and switch back
-            self.driver.close()
-            self.driver.switch_to.window(self.driver.window_handles[0])
-            time.sleep(1)
+            # Safely close tab and switch back
+            try:
+                # Check if we have multiple windows before closing
+                if len(self.driver.window_handles) > 1:
+                    self.driver.close()
+                    self.driver.switch_to.window(self.driver.window_handles[0])
+                    time.sleep(1)
+            except Exception as close_error:
+                print(f"  ⚠ Error closing tab: {close_error}")
+                # Try to recover by switching to first window
+                try:
+                    if len(self.driver.window_handles) > 0:
+                        self.driver.switch_to.window(self.driver.window_handles[0])
+                except:
+                    pass
         
         return property_data
     
+    def save_property_immediately(self, property_data):
+        """Save single property immediately if it has oil heating"""
+        # Only save if has oil heating
+        if property_data.get('has_oil_heating') != 'Yes':
+            print(f"  ⊗ Skipped (No oil heating)")
+            return False
+        
+        try:
+            # Create DataFrame from single property
+            df_new = pd.DataFrame([property_data])
+            
+            # Remove unnecessary columns before saving
+            columns_to_remove = ['url', 'scrape_date', 'price', 'beds', 'baths', 
+                                'sqft', 'has_oil_heating', 'listing_agent', 'broker']
+            for col in columns_to_remove:
+                if col in df_new.columns:
+                    df_new = df_new.drop(col, axis=1)
+            
+            # Check if file exists
+            if os.path.exists(self.excel_file):
+                # Read existing data
+                df_existing = pd.read_excel(self.excel_file)
+                
+                # Append new data
+                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                
+                # Remove duplicates based on full_address
+                df_combined = df_combined.drop_duplicates(subset=['full_address'], keep='first')
+                
+                # Save back to file
+                df_combined.to_excel(self.excel_file, index=False)
+                
+                self.properties_saved_count += 1
+                print(f"  ✓ SAVED to Excel (Total oil properties: {self.properties_saved_count})")
+            else:
+                # Create new file
+                df_new.to_excel(self.excel_file, index=False)
+                self.properties_saved_count += 1
+                print(f"  ✓ Created Excel file and saved property (Total: {self.properties_saved_count})")
+            
+            return True
+            
+        except Exception as e:
+            print(f"  ✗ Error saving property: {e}")
+            return False
+    
     def scrape_current_page(self):
         """Scrape all properties on current page"""
-        properties = []
+        oil_properties_on_page = 0
         
         try:
             # Wait for property cards to load
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.bp-Homecard'))
             )
+            time.sleep(1)  # Extra wait for all to render
             
             # Get all property links
             property_links = self.driver.find_elements(By.CSS_SELECTOR, 'a.bp-Homecard__Address')
             property_urls = [link.get_attribute('href') for link in property_links if link.get_attribute('href')]
             
-            print(f"\n📋 Found {len(property_urls)} properties on this page\n")
+            total_on_page = len(property_urls)
+            print(f"\n📋 Found {total_on_page} properties on this page")
+            
+            # Apply starting element filter (only for first time)
+            if self.start_element > 1:
+                print(f"⚡ Starting from property #{self.start_element}")
+                property_urls = property_urls[self.start_element - 1:]  # Python uses 0-based index
+                properties_to_scrape = len(property_urls)
+                print(f"📋 Will scrape {properties_to_scrape} properties (skipped first {self.start_element - 1})")
+                # Reset to 1 for subsequent pages
+                self.start_element = 1
+            else:
+                properties_to_scrape = total_on_page
+            
+            print()
             
             # Process each property
             for i, url in enumerate(property_urls, 1):
-                print(f"[{i}/{len(property_urls)}] Processing: {url}")
-                property_data = self.extract_property_details(url)
-                properties.append(property_data)
-                time.sleep(1)  # Be nice to the server
+                print(f"[{i}/{properties_to_scrape}] Processing: {url}")
+                
+                try:
+                    property_data = self.extract_property_details(url)
+                    
+                    # Save immediately if has oil heating
+                    if self.save_property_immediately(property_data):
+                        oil_properties_on_page += 1
+                    
+                    time.sleep(1)  # Be nice to the server
+                    
+                except Exception as e:
+                    print(f"  ✗ Error processing property: {e}")
+                    # Continue to next property instead of stopping
+                    continue
+            
+            print(f"\n✓ Oil properties found on this page: {oil_properties_on_page}")
             
         except Exception as e:
             print(f"✗ Error scraping page: {e}")
         
-        return properties
+        return oil_properties_on_page
     
     def has_next_page(self):
         """Check if next page button exists and is clickable"""
         try:
-            next_button = self.driver.find_element(By.CSS_SELECTOR, 'button.PageArrow--next')
-            classes = next_button.get_attribute('class')
+            # Look for the next button with the new structure
+            next_button = self.driver.find_element(By.CSS_SELECTOR, 'button.PageArrow__direction--next')
             
-            # Check if hidden
-            if 'PageArrow--hidden' in classes:
+            # Check if it has the hidden class
+            button_classes = next_button.get_attribute('class')
+            if 'PageArrow--hidden' in button_classes:
+                print("  ℹ Next button is hidden (last page)")
                 return False
+            
+            # Check if button is disabled
+            if not next_button.is_enabled():
+                print("  ℹ Next button is disabled (last page)")
+                return False
+                
             return True
-        except:
+            
+        except NoSuchElementException:
+            print("  ℹ Next button not found (last page)")
+            return False
+        except Exception as e:
+            print(f"  ⚠ Error checking for next page: {e}")
             return False
     
     def go_to_next_page(self):
         """Navigate to next page"""
         try:
-            next_button = self.driver.find_element(By.CSS_SELECTOR, 'button.PageArrow--next')
+            # Find the next button
+            next_button = self.driver.find_element(By.CSS_SELECTOR, 'button.PageArrow__direction--next')
+            
+            # Scroll to it
             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
             time.sleep(1)
-            next_button.click()
+            
+            # Click it
+            try:
+                next_button.click()
+                print("  ✓ Clicked next button")
+            except:
+                # Try JavaScript click if normal click fails
+                self.driver.execute_script("arguments[0].click();", next_button)
+                print("  ✓ Clicked next button (JavaScript)")
+            
             time.sleep(3)
             
             # Wait for new page to load
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.bp-Homecard'))
             )
+            
+            print("  ✓ New page loaded")
             return True
+            
         except Exception as e:
-            print(f"✗ Error navigating to next page: {e}")
+            print(f"  ✗ Error navigating to next page: {e}")
             return False
-    
-    def save_to_excel(self, properties):
-        """Save or append properties to Excel file"""
-        if not properties:
-            print("⚠ No properties to save")
-            return
-        
-        df_new = pd.DataFrame(properties)
-        
-        # Check if file exists
-        if os.path.exists(self.excel_file):
-            try:
-                # Read existing data
-                df_existing = pd.read_excel(self.excel_file)
-                # Append new data
-                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-                # Remove duplicates based on URL
-                df_combined = df_combined.drop_duplicates(subset=['url'], keep='first')
-                df_combined.to_excel(self.excel_file, index=False)
-                print(f"\n✓ Appended {len(df_new)} properties to existing file")
-                print(f"✓ Total properties in file: {len(df_combined)}")
-            except Exception as e:
-                print(f"✗ Error appending to Excel: {e}")
-                # Save as backup
-                backup_file = f"redfin_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                df_new.to_excel(backup_file, index=False)
-                print(f"✓ Saved to backup file: {backup_file}")
-        else:
-            # Create new file
-            df_new.to_excel(self.excel_file, index=False)
-            print(f"\n✓ Created new Excel file: {self.excel_file}")
-            print(f"✓ Saved {len(df_new)} properties")
     
     def run(self):
         """Main run method"""
@@ -515,63 +741,71 @@ class RedfinScraperInteractive:
             # Let user apply filters
             self.start_and_wait_for_user()
             
-            all_properties = []
-            page_num = 1
-            
+            # Continue scraping until no more pages or user stops
             while True:
                 print("\n" + "="*60)
-                print(f"SCRAPING PAGE {page_num}")
+                print(f"SCRAPING PAGE {self.current_page_num}")
                 print("="*60)
                 
-                # Scrape current page
-                properties = self.scrape_current_page()
-                all_properties.extend(properties)
+                # Scrape current page (saves automatically)
+                oil_count = self.scrape_current_page()
                 
-                # Save after each page
-                self.save_to_excel(properties)
+                print(f"\n📊 Page {self.current_page_num} Summary:")
+                print(f"   • Oil properties on this page: {oil_count}")
+                print(f"   • Total oil properties saved: {self.properties_saved_count}")
                 
                 # Check for next page
+                print("\n→ Checking for next page...")
                 if not self.has_next_page():
-                    print("\n✓ No more pages available")
+                    print("\n" + "="*60)
+                    print("✓ NO MORE PAGES - Reached the end")
+                    print("="*60)
                     break
                 
                 # Ask user if they want to continue
                 print("\n" + "-"*60)
-                continue_scraping = input("Continue to next page? (y/n): ").strip().lower()
+                print(f"📄 More pages available...")
+                continue_scraping = input("Continue to next page? (y/n, default: y): ").strip().lower()
                 
-                if continue_scraping != 'y':
+                if continue_scraping == 'n':
                     print("\n✓ Scraping stopped by user")
                     break
                 
                 # Go to next page
                 print("\n→ Navigating to next page...")
                 if not self.go_to_next_page():
-                    print("✗ Failed to navigate to next page")
+                    print("\n✗ Failed to navigate to next page - stopping")
                     break
                 
-                page_num += 1
+                self.current_page_num += 1
+                time.sleep(2)  # Extra wait between pages
             
             # Final summary
             print("\n" + "="*60)
             print("SCRAPING COMPLETED!")
             print("="*60)
-            print(f"✓ Total properties scraped: {len(all_properties)}")
+            print(f"📄 Total pages scraped: {self.current_page_num}")
+            print(f"🔥 Total OIL properties saved: {self.properties_saved_count}")
             print(f"✓ Data saved to: {self.excel_file}")
-            
-            # Count oil heating properties
-            oil_count = sum(1 for p in all_properties if p.get('has_oil_heating') == 'Yes')
-            print(f"🔥 Properties with OIL heating: {oil_count}")
             print("="*60 + "\n")
             
         except KeyboardInterrupt:
             print("\n\n⚠ Scraping interrupted by user (Ctrl+C)")
+            print(f"✓ Data saved before interruption: {self.properties_saved_count} oil properties")
+            print(f"✓ Check file: {self.excel_file}")
         except Exception as e:
             print(f"\n✗ Error during scraping: {e}")
+            print(f"✓ Data saved so far: {self.properties_saved_count} oil properties")
+            import traceback
+            traceback.print_exc()
         finally:
             if self.driver:
                 print("\n→ Closing browser...")
-                self.driver.quit()
-                print("✓ Browser closed")
+                try:
+                    self.driver.quit()
+                    print("✓ Browser closed")
+                except:
+                    print("⚠ Browser may still be open")
 
 
 def main():
@@ -579,17 +813,24 @@ def main():
     print("\n")
     print("╔" + "="*58 + "╗")
     print("║" + " "*15 + "REDFIN WEB SCRAPER" + " "*25 + "║")
-    print("║" + " "*12 + "Interactive User Control" + " "*22 + "║")
+    print("║" + " "*10 + "OIL HEATING PROPERTIES ONLY" + " "*20 + "║")
     print("╚" + "="*58 + "╝")
     
-    excel_file = input("\nEnter Excel filename (default: redfin_properties.xlsx): ").strip()
+    excel_file = input("\nEnter Excel filename (default: redfin_oil_properties.xlsx): ").strip()
     if not excel_file:
-        excel_file = "redfin_properties.xlsx"
+        excel_file = "redfin_oil_properties.xlsx"
     
     if not excel_file.endswith('.xlsx'):
         excel_file += '.xlsx'
     
     print(f"\n✓ Will save to: {excel_file}")
+    print("✓ Only properties with OIL heating will be saved")
+    print("✓ URL column will NOT be included")
+    print("✓ Data is saved after EACH property (safe from interruptions)")
+    
+    if os.path.exists(excel_file):
+        print(f"\n⚠ File already exists: {excel_file}")
+        print("✓ New data will be APPENDED to existing file")
     
     scraper = RedfinScraperInteractive(excel_file=excel_file)
     scraper.run()
