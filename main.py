@@ -1,8 +1,3 @@
-"""
-Redfin Property Scraper - Complete Version with Auto Price Phases
-All original features + automatic phase management for unlimited scraping
-"""
-
 import time
 import pandas as pd
 from selenium import webdriver
